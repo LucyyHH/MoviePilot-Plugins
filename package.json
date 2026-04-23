@@ -1061,5 +1061,18 @@
     "author": "cddjr",
     "level": 1,
     "v2": true
+  },
+  "MediaRecognizePreprocess": {
+    "name": "媒体识别预处理",
+    "description": "在目录监控、手动整理等识别前，按路径、文件名和清洗规则修正媒体识别输入，不改源文件名。",
+    "labels": "识别,文件整理",
+    "version": "1.0.0",
+    "icon": "scraper.png",
+    "author": "LucyyHH",
+    "level": 1,
+    "v2": true,
+    "history": {
+      "v1.0.0": "首个版本，支持按目录规则修正媒体识别输入"
+    }
   }
 }
