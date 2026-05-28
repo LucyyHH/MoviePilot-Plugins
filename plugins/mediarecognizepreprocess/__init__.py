@@ -353,6 +353,27 @@ _METAINFO_TARGETS = (
 )
 
 _EPISODE_PREFIX_PATTERN = re.compile(r"^(?P<episode>\d{1,3})(?=[.\s_-]|$)")
+_EPISODE_YEAR_SIGNATURE_PATTERN = re.compile(
+    r"^#?\s*(?P<episode>\d{1,3})"
+    r"(?:\s*[（(]\s*(?P<year_paren>(?:19|20)\d{2})\s*[）)]"
+    r"|[.\s_-]+(?P<year_dot>(?:19|20)\d{2})(?=[）).\s_-]|$))",
+    re.IGNORECASE,
+)
+_EPISODE_ONLY_SIGNATURE_PATTERN = re.compile(
+    r"^#?\s*(?P<episode>\d{1,3})(?=$|[.\s_-](?![pk]\b))",
+    re.IGNORECASE,
+)
+_YEAR_AS_TITLE_SIGNATURE_PATTERN = re.compile(
+    r"^#?\s*(?P<title_year>(?:19|20)\d{2})\s*[（(]\s*(?P<year>(?:19|20)\d{2})\s*[）)]"
+    r"(?:$|[\s._-])",
+    re.IGNORECASE,
+)
+_YEAR_TECH_SOURCE_PATTERN = re.compile(
+    r"^(?P<year>(?:19|20)\d{2})(?:$|[\s._-]+(?:"
+    r"\d{3,4}p|4k|8k|uhd|web(?:[\s._-]?dl)?|bluray|bdrip|remux|h(?:264|265)|x(?:264|265)|hevc|aac|ac3|eac3|ddp?"
+    r")\b)",
+    re.IGNORECASE,
+)
 _HISTORY_KEY_SEPARATOR_PATTERN = re.compile(r"[\s._-]+")
 _HISTORY_PATH_PROBE_PATTERN = re.compile(r"/\d{1,3}\.[^/]+$")
 
@@ -486,7 +507,7 @@ class MediaRecognizePreprocess(_PluginBase):
     plugin_name = "媒体识别预处理"
     plugin_desc = "在目录监控、手动整理等识别前，按路径、文件名和清洗规则修正媒体识别输入，不改源文件名。"
     plugin_icon = "scraper.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "LucyyHH"
     author_url = ""
     plugin_config_prefix = "mediarecognizepreprocess_"
@@ -1159,12 +1180,120 @@ class MediaRecognizePreprocess(_PluginBase):
         for candidate in candidates:
             if self._normalize_history_key(Path(candidate).stem) == current_key:
                 return candidate
+        current_signature = self._episode_year_signature(source.raw_name)
+        if current_signature:
+            return self._find_unique_history_candidate(
+                candidates=candidates,
+                raw_name=source.raw_name,
+                current_signature=current_signature,
+                candidate_signature=self._episode_year_signature,
+                label="集号年份",
+            )
+
+        current_year = self._year_as_title_signature(source.raw_name)
+        if current_year:
+            return self._find_unique_history_candidate(
+                candidates=candidates,
+                raw_name=source.raw_name,
+                current_signature=current_year,
+                candidate_signature=self._year_tech_source_signature,
+                label="年份技术名",
+                require_meaningful_title=True,
+            )
+
+        current_episode = self._episode_only_signature(source.raw_name)
+        if current_episode is not None:
+            return self._find_unique_history_candidate(
+                candidates=candidates,
+                raw_name=source.raw_name,
+                current_signature=current_episode,
+                candidate_signature=self._episode_only_signature,
+                label="纯集号",
+            )
+        return None
+
+    def _find_unique_history_candidate(
+        self,
+        candidates: List[str],
+        raw_name: str,
+        current_signature,
+        candidate_signature,
+        label: str,
+        require_meaningful_title: bool = False,
+    ) -> Optional[str]:
+        matched_candidates = []
+        for candidate in candidates:
+            if require_meaningful_title and not self._history_source_has_meaningful_title(candidate):
+                continue
+            if candidate_signature(Path(candidate).stem) == current_signature:
+                matched_candidates.append(candidate)
+
+        if len(matched_candidates) == 1:
+            logger.info(
+                f"{self.plugin_name} 命中历史源路径{label}兜底："
+                f"raw_name={raw_name}, history_src={matched_candidates[0]}"
+            )
+            return matched_candidates[0]
+        if len(matched_candidates) > 1:
+            logger.warning(
+                f"{self.plugin_name} 历史源路径{label}兜底存在多个候选，已跳过："
+                f"raw_name={raw_name}, count={len(matched_candidates)}"
+            )
         return None
 
     @staticmethod
     def _normalize_history_key(value: str) -> str:
         normalized = str(value or "").lower().replace("：", ":")
         return _HISTORY_KEY_SEPARATOR_PATTERN.sub("", normalized)
+
+    @staticmethod
+    def _episode_year_signature(value: str) -> Optional[Tuple[int, str]]:
+        match = _EPISODE_YEAR_SIGNATURE_PATTERN.match(str(value or "").strip())
+        if not match:
+            return None
+        year = match.group("year_paren") or match.group("year_dot")
+        try:
+            episode = int(match.group("episode"))
+        except (TypeError, ValueError):
+            return None
+        return episode, year
+
+    @staticmethod
+    def _episode_only_signature(value: str) -> Optional[int]:
+        match = _EPISODE_ONLY_SIGNATURE_PATTERN.match(str(value or "").strip())
+        if not match:
+            return None
+        try:
+            return int(match.group("episode"))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _year_as_title_signature(value: str) -> Optional[str]:
+        match = _YEAR_AS_TITLE_SIGNATURE_PATTERN.match(str(value or "").strip())
+        if not match:
+            return None
+        title_year = match.group("title_year")
+        year = match.group("year")
+        if title_year != year:
+            return None
+        return year
+
+    @staticmethod
+    def _year_tech_source_signature(value: str) -> Optional[str]:
+        match = _YEAR_TECH_SOURCE_PATTERN.match(str(value or "").strip())
+        if not match:
+            return None
+        return match.group("year")
+
+    def _history_source_has_meaningful_title(self, source_path: str) -> bool:
+        if not self._parser:
+            return False
+        result, _ = self._parser.match_path(Path(source_path), log_misses=False)
+        if not result or not result.title:
+            return False
+        title = str(result.title).strip()
+        return bool(title and not re.fullmatch(r"#?\s*(?:19|20)\d{2}", title))
 
     @staticmethod
     def _attach_source_path(meta, source_path: str):
